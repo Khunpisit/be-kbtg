@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-// User represents an application user.
+// User represents an application user stored in the users table.
 type User struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	Email        string    `gorm:"uniqueIndex;size:255;not null" json:"email"`
@@ -19,5 +19,5 @@ type User struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-// TableName overrides default pluralized table name.
+// TableName overrides the default pluralized table name that GORM would infer.
 func (User) TableName() string { return "users" }
