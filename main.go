@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -18,8 +21,12 @@ import (
 const jwtSecret = "dev-secret-change" // for demo only
 
 func main() {
-	// Init DB
-	db, err := gorm.Open(sqlite.Open("app.db"), &gorm.Config{})
+	// Init DB (allow override by env DB_PATH)
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "app.db"
+	}
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -102,6 +109,85 @@ func main() {
 		}
 		return c.JSON(fiber.Map{"token": signed})
 	})
+
+	// --- Auth middleware and profile endpoints ---
+	authRequired := func(c *fiber.Ctx) error {
+		authHeader := c.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			return c.Status(401).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+		tkn, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+			if t.Method != jwt.SigningMethodHS256 {
+				return nil, errors.New("unexpected signing method")
+			}
+			return []byte(jwtSecret), nil
+		})
+		if err != nil || !tkn.Valid {
+			return c.Status(401).JSON(fiber.Map{"error": "invalid token"})
+		}
+		claims, ok := tkn.Claims.(jwt.MapClaims)
+		if !ok {
+			return c.Status(401).JSON(fiber.Map{"error": "invalid token claims"})
+		}
+		idFloat, ok := claims["sub"].(float64)
+		if !ok {
+			return c.Status(401).JSON(fiber.Map{"error": "invalid subject"})
+		}
+		var u models.User
+		if err := db.First(&u, uint(idFloat)).Error; err != nil {
+			return c.Status(401).JSON(fiber.Map{"error": "user not found"})
+		}
+		c.Locals("user", &u)
+		return c.Next()
+	}
+
+	me := app.Group("/me", authRequired)
+	me.Get("/", func(c *fiber.Ctx) error {
+		user := c.Locals("user").(*models.User)
+		return c.JSON(user)
+	})
+	me.Put("/", func(c *fiber.Ctx) error {
+		user := c.Locals("user").(*models.User)
+		var body struct {
+			FirstName   *string `json:"first_name"`
+			LastName    *string `json:"last_name"`
+			DisplayName *string `json:"display_name"`
+			Phone       *string `json:"phone"`
+			AvatarURL   *string `json:"avatar_url"`
+			Bio         *string `json:"bio"`
+		}
+		if err := c.BodyParser(&body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		// Update only provided fields
+		if body.FirstName != nil {
+			user.FirstName = strings.TrimSpace(*body.FirstName)
+		}
+		if body.LastName != nil {
+			user.LastName = strings.TrimSpace(*body.LastName)
+		}
+		if body.DisplayName != nil {
+			user.DisplayName = strings.TrimSpace(*body.DisplayName)
+		}
+		if body.Phone != nil {
+			user.Phone = strings.TrimSpace(*body.Phone)
+		}
+		if body.AvatarURL != nil {
+			user.AvatarURL = strings.TrimSpace(*body.AvatarURL)
+		}
+		if body.Bio != nil {
+			user.Bio = strings.TrimSpace(*body.Bio)
+		}
+		if user.DisplayName == "" && (user.FirstName != "" || user.LastName != "") {
+			user.DisplayName = strings.TrimSpace(strings.Trim(user.FirstName+" "+user.LastName, " "))
+		}
+		if err := db.Save(user).Error; err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "db error"})
+		}
+		return c.JSON(user)
+	})
+	// --- end profile endpoints ---
 
 	if err := app.Listen(":3000"); err != nil {
 		log.Fatal(err)
